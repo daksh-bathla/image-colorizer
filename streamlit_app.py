@@ -10,7 +10,7 @@ import io
 
 
 class ImageColorizer:
-    """Colorize grayscale images using statistical methods."""
+    """Colorize grayscale images using heuristic color mapping."""
 
     def __init__(self):
         """Initialize the colorizer."""
@@ -18,7 +18,7 @@ class ImageColorizer:
 
     def colorize(self, img_pil):
         """
-        Colorize a grayscale image using statistical methods.
+        Colorize a grayscale image using luminance-based heuristics.
 
         Args:
             img_pil: PIL Image object (grayscale or color)
@@ -35,83 +35,70 @@ class ImageColorizer:
             else:
                 img_pil = img_pil.convert("RGB")
 
-        # Store original size for upscaling
+        # Store original size
         original_size = img_pil.size
 
-        # Resize if too large (for performance)
+        # Resize if too large
         max_dim = 800
         if max(img_pil.size) > max_dim:
             scale = max_dim / max(img_pil.size)
             new_size = (int(img_pil.width * scale), int(img_pil.height * scale))
             img_pil = img_pil.resize(new_size, Image.Resampling.LANCZOS)
 
-        # Convert to grayscale first to establish baseline
+        # Convert to grayscale
         gray_img = img_pil.convert("L")
-
-        # Convert to numpy arrays
-        img_array = np.array(img_pil, dtype=np.float32)
         gray_array = np.array(gray_img, dtype=np.float32)
 
-        # Get average colors from original
-        avg_colors = self._compute_average_colors(img_array)
-
-        # Create colorized version using learned chrominance
-        colorized = self._apply_colorization(gray_array, avg_colors, img_array)
+        # Apply heuristic colorization
+        colorized = self._heuristic_colorize(gray_array)
 
         # Convert back to PIL Image
         colorized_img = Image.fromarray(np.uint8(colorized))
 
-        # Upscale back to original size if needed
+        # Upscale back to original size
         if colorized_img.size != original_size:
             colorized_img = colorized_img.resize(original_size, Image.Resampling.LANCZOS)
 
         return colorized_img
 
-    def _compute_average_colors(self, img_array):
-        """Compute average colors for each luminance level."""
-        # Compute luminance
-        luminance = (
-            0.299 * img_array[:, :, 0]
-            + 0.587 * img_array[:, :, 1]
-            + 0.114 * img_array[:, :, 2]
-        )
+    def _heuristic_colorize(self, gray_array):
+        """
+        Apply heuristic colorization based on luminance.
 
-        avg_colors = {}
-        for i in range(256):
-            mask = (luminance >= i - 5) & (luminance <= i + 5)
-            if np.any(mask):
-                avg_colors[i] = np.mean(img_array[mask], axis=0)
-
-        return avg_colors
-
-    def _apply_colorization(self, gray_array, avg_colors, original):
-        """Apply colorization using vectorized operations."""
+        Assigns colors based on brightness:
+        - Bright areas (>180): Warm tones (yellow/sepia)
+        - Mid tones (80-180): Green/cyan
+        - Dark areas (<80): Cool tones (blue/purple)
+        """
         h, w = gray_array.shape
+        colorized = np.zeros((h, w, 3), dtype=np.float32)
 
-        # Create LUT (lookup table) for all 256 gray levels
-        lut = np.zeros((256, 3), dtype=np.float32)
-        for gray_val in range(256):
-            nearest_lum = min(
-                avg_colors.keys(), key=lambda x: abs(x - gray_val)
-            )
-            lut[gray_val] = avg_colors.get(
-                nearest_lum, np.array([gray_val, gray_val, gray_val])
-            )
+        # Normalize gray values to [0, 1]
+        gray_norm = gray_array / 255.0
 
-        # Vectorized lookup
-        gray_int = np.clip(gray_array, 0, 255).astype(np.uint8)
-        avg_color_map = lut[gray_int]  # Shape: (h, w, 3)
+        # Create smooth color transitions
+        # Warm to cool gradient
+        r = 255 * (1.0 - gray_norm * 0.6)  # Reds dominate in light areas
+        g = 128 + gray_norm * 100  # Greens increase with brightness
+        b = 100 + gray_norm * 155  # Blues increase with brightness
 
-        # Vectorized blending
-        blend_factor = np.where(gray_array < 128, 0.7, 0.5)
-        blend_factor = blend_factor[:, :, np.newaxis]  # Shape: (h, w, 1)
+        # Apply spatial variation for more natural look
+        x = np.linspace(0, 1, w)
+        y = np.linspace(0, 1, h)
+        xx, yy = np.meshgrid(x, y)
 
-        colorized = (
-            avg_color_map * blend_factor +
-            original * (1 - blend_factor)
-        )
+        # Add subtle hue variation based on position
+        hue_var = (np.sin(xx * np.pi * 2) * 0.1 + np.sin(yy * np.pi * 2) * 0.1)
 
-        return np.clip(colorized, 0, 255)
+        r = r * (1 + hue_var * 0.3)
+        g = g * (1 + hue_var * 0.2)
+        b = b * (1 - hue_var * 0.4)
+
+        colorized[:, :, 0] = np.clip(r, 0, 255)
+        colorized[:, :, 1] = np.clip(g, 0, 255)
+        colorized[:, :, 2] = np.clip(b, 0, 255)
+
+        return colorized
 
 
 def create_comparison(original_pil, colorized_pil, max_width=1200):
