@@ -35,6 +35,16 @@ class ImageColorizer:
             else:
                 img_pil = img_pil.convert("RGB")
 
+        # Store original size for upscaling
+        original_size = img_pil.size
+
+        # Resize if too large (for performance)
+        max_dim = 800
+        if max(img_pil.size) > max_dim:
+            scale = max_dim / max(img_pil.size)
+            new_size = (int(img_pil.width * scale), int(img_pil.height * scale))
+            img_pil = img_pil.resize(new_size, Image.Resampling.LANCZOS)
+
         # Convert to grayscale first to establish baseline
         gray_img = img_pil.convert("L")
 
@@ -50,6 +60,10 @@ class ImageColorizer:
 
         # Convert back to PIL Image
         colorized_img = Image.fromarray(np.uint8(colorized))
+
+        # Upscale back to original size if needed
+        if colorized_img.size != original_size:
+            colorized_img = colorized_img.resize(original_size, Image.Resampling.LANCZOS)
 
         return colorized_img
 
@@ -71,28 +85,31 @@ class ImageColorizer:
         return avg_colors
 
     def _apply_colorization(self, gray_array, avg_colors, original):
-        """Apply colorization based on learned statistics."""
+        """Apply colorization using vectorized operations."""
         h, w = gray_array.shape
-        colorized = np.zeros((h, w, 3), dtype=np.float32)
 
-        # For each pixel, determine color based on luminance and learned statistics
-        for i in range(h):
-            for j in range(w):
-                gray_val = int(gray_array[i, j])
+        # Create LUT (lookup table) for all 256 gray levels
+        lut = np.zeros((256, 3), dtype=np.float32)
+        for gray_val in range(256):
+            nearest_lum = min(
+                avg_colors.keys(), key=lambda x: abs(x - gray_val)
+            )
+            lut[gray_val] = avg_colors.get(
+                nearest_lum, np.array([gray_val, gray_val, gray_val])
+            )
 
-                # Find nearest luminance in avg_colors
-                nearest_lum = min(
-                    avg_colors.keys(), key=lambda x: abs(x - gray_val)
-                )
-                avg_color = avg_colors.get(
-                    nearest_lum, np.array([gray_val, gray_val, gray_val])
-                )
+        # Vectorized lookup
+        gray_int = np.clip(gray_array, 0, 255).astype(np.uint8)
+        avg_color_map = lut[gray_int]  # Shape: (h, w, 3)
 
-                # Blend between original colors and learned average
-                blend_factor = 0.7 if gray_val < 128 else 0.5
-                colorized[i, j] = (
-                    avg_color * blend_factor + original[i, j] * (1 - blend_factor)
-                )
+        # Vectorized blending
+        blend_factor = np.where(gray_array < 128, 0.7, 0.5)
+        blend_factor = blend_factor[:, :, np.newaxis]  # Shape: (h, w, 1)
+
+        colorized = (
+            avg_color_map * blend_factor +
+            original * (1 - blend_factor)
+        )
 
         return np.clip(colorized, 0, 255)
 
