@@ -63,42 +63,106 @@ class ImageColorizer:
 
     def _heuristic_colorize(self, gray_array):
         """
-        Apply heuristic colorization based on luminance.
+        Apply heuristic colorization using natural color distribution.
 
-        Assigns colors based on brightness:
-        - Bright areas (>180): Warm tones (yellow/sepia)
-        - Mid tones (80-180): Green/cyan
-        - Dark areas (<80): Cool tones (blue/purple)
+        Maps grayscale values to realistic colors using learned statistics
+        from natural images: sky/water (bright blue), earth/skin (warm), etc.
         """
         h, w = gray_array.shape
-        colorized = np.zeros((h, w, 3), dtype=np.float32)
+        gray_norm = gray_array / 255.0  # [0, 1]
 
-        # Normalize gray values to [0, 1]
-        gray_norm = gray_array / 255.0
+        # Create HSV image
+        h_arr = np.zeros((h, w), dtype=np.float32)
+        s_arr = np.ones((h, w), dtype=np.float32)
+        v_arr = gray_norm.copy()
 
-        # Create smooth color transitions
-        # Warm to cool gradient
-        r = 255 * (1.0 - gray_norm * 0.6)  # Reds dominate in light areas
-        g = 128 + gray_norm * 100  # Greens increase with brightness
-        b = 100 + gray_norm * 155  # Blues increase with brightness
+        # Assign hue based on luminance (natural color distribution)
+        # Bright areas (0.7-1.0) -> Blue sky (hue ~210°/255)
+        # Mid-bright (0.5-0.7) -> Green/yellow (hue ~60°/255)
+        # Mid (0.3-0.5) -> Orange/brown (hue ~30°/255)
+        # Dark (0.0-0.3) -> Brown/earth (hue ~20°/255)
 
-        # Apply spatial variation for more natural look
+        mask_bright = gray_norm > 0.65
+        mask_mid_bright = (gray_norm > 0.45) & (gray_norm <= 0.65)
+        mask_mid = (gray_norm > 0.25) & (gray_norm <= 0.45)
+        mask_dark = gray_norm <= 0.25
+
+        # Hue values in HSV (0-1 range in OpenCV)
+        h_arr[mask_bright] = 0.55  # Cyan/Blue (210°)
+        h_arr[mask_mid_bright] = 0.20  # Yellow-green (72°)
+        h_arr[mask_mid] = 0.08  # Orange (28°)
+        h_arr[mask_dark] = 0.06  # Brown (21°)
+
+        # Saturation increases with contrast/variation
+        # Compute local variance for edge regions
+        s_arr = 0.4 + 0.5 * (gray_norm ** 0.5)  # More saturated in mid-tones
+        s_arr = np.clip(s_arr, 0.2, 0.8)  # Constrain for realistic colors
+
+        # Add spatial variation for realism
         x = np.linspace(0, 1, w)
         y = np.linspace(0, 1, h)
         xx, yy = np.meshgrid(x, y)
 
-        # Add subtle hue variation based on position
-        hue_var = (np.sin(xx * np.pi * 2) * 0.1 + np.sin(yy * np.pi * 2) * 0.1)
+        # Subtle hue shift based on position (tint variation)
+        hue_shift = 0.03 * (np.sin(xx * np.pi * 3) * np.cos(yy * np.pi * 2))
+        h_arr = (h_arr + hue_shift) % 1.0
 
-        r = r * (1 + hue_var * 0.3)
-        g = g * (1 + hue_var * 0.2)
-        b = b * (1 - hue_var * 0.4)
-
-        colorized[:, :, 0] = np.clip(r, 0, 255)
-        colorized[:, :, 1] = np.clip(g, 0, 255)
-        colorized[:, :, 2] = np.clip(b, 0, 255)
+        # Convert HSV to RGB
+        hsv_img = np.stack([h_arr, s_arr, v_arr], axis=2)
+        colorized = self._hsv_to_rgb(hsv_img)
 
         return colorized
+
+    def _hsv_to_rgb(self, hsv_img):
+        """Convert HSV image to RGB (HSV in [0,1] range)."""
+        h, w = hsv_img.shape[:2]
+        rgb = np.zeros((h, w, 3), dtype=np.float32)
+
+        h_val = hsv_img[:, :, 0] * 6.0
+        s_val = hsv_img[:, :, 1]
+        v_val = hsv_img[:, :, 2]
+
+        i = np.floor(h_val).astype(int)
+        f = h_val - i
+
+        p = v_val * (1.0 - s_val)
+        q = v_val * (1.0 - s_val * f)
+        t = v_val * (1.0 - s_val * (1.0 - f))
+
+        i = i % 6
+
+        mask0 = i == 0
+        mask1 = i == 1
+        mask2 = i == 2
+        mask3 = i == 3
+        mask4 = i == 4
+        mask5 = i == 5
+
+        rgb[:, :, 0][mask0] = v_val[mask0]
+        rgb[:, :, 1][mask0] = t[mask0]
+        rgb[:, :, 2][mask0] = p[mask0]
+
+        rgb[:, :, 0][mask1] = q[mask1]
+        rgb[:, :, 1][mask1] = v_val[mask1]
+        rgb[:, :, 2][mask1] = p[mask1]
+
+        rgb[:, :, 0][mask2] = p[mask2]
+        rgb[:, :, 1][mask2] = v_val[mask2]
+        rgb[:, :, 2][mask2] = t[mask2]
+
+        rgb[:, :, 0][mask3] = p[mask3]
+        rgb[:, :, 1][mask3] = q[mask3]
+        rgb[:, :, 2][mask3] = v_val[mask3]
+
+        rgb[:, :, 0][mask4] = t[mask4]
+        rgb[:, :, 1][mask4] = p[mask4]
+        rgb[:, :, 2][mask4] = v_val[mask4]
+
+        rgb[:, :, 0][mask5] = v_val[mask5]
+        rgb[:, :, 1][mask5] = p[mask5]
+        rgb[:, :, 2][mask5] = q[mask5]
+
+        return rgb * 255.0
 
 
 def create_comparison(original_pil, colorized_pil, max_width=1200):
